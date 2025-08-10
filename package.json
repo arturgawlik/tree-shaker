@@ -1,0 +1,14 @@
+{
+  "type": "module",
+  "scripts": {
+    "tap": "tap --timeout 300000"
+  },
+  "dependencies": {
+    "acorn": "^8.15.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.2.1",
+    "tap": "^21.1.0",
+    "typescript": "^5.9.2"
+  }
+}
