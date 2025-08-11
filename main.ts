@@ -1,17 +1,19 @@
 import { readFile } from "node:fs/promises";
 import {
-  type ImportDeclaration,
-  ImportDefaultSpecifier,
-  ImportNamespaceSpecifier,
-  ImportSpecifier,
   parse,
+  type ImportDeclaration,
   type Program,
+  type Node,
+  type ImportSpecifier,
+  type Identifier,
 } from "acorn";
+import MagicString from "magic-string";
 
 export type Options = {
   input: string;
   parent: URL;
 };
+
 /**
  * Has single module definition with it's AST in form of `Program` object from `acorn`.
  * Exposing some module data e.g. module dependencies.
@@ -38,10 +40,14 @@ class Module {
   public calculateNotUsedImportDeclarations() {
     const importSpecifiersMap = this.calculateImportSpecifiersMap();
     const usedSpecifiers = this.calculateUsedSpecifiersInModuleBody();
-    const notUsedSpecifiers = [];
+    const notUsedSpecifiers: ImportDeclaration[] = [];
     for (const [importDeclaration, importSpecifiers] of importSpecifiersMap) {
       const anyUsed = importSpecifiers.some((importSpecifier) =>
-        usedSpecifiers.includes(importSpecifier)
+        usedSpecifiers.some(
+          (usedSpecifier) =>
+            this.nodeToPlain(usedSpecifier) ===
+            this.nodeToPlain(importSpecifier)
+        )
       );
       if (!anyUsed) {
         notUsedSpecifiers.push(importDeclaration);
@@ -49,37 +55,40 @@ class Module {
     }
     return notUsedSpecifiers;
   }
+  public getCode({ withRemovedNodes }: { withRemovedNodes: Node[] }) {
+    const str = new MagicString(this.source);
+    if (withRemovedNodes && withRemovedNodes.length) {
+      this.removeNodes(str, withRemovedNodes);
+    }
+    return str.toString();
+  }
+  private removeNodes(source: MagicString, nodes: Node[]) {
+    return nodes.reduce((code: MagicString, nodeToRemove: Node) => {
+      return code.remove(nodeToRemove.start, nodeToRemove.end);
+    }, source);
+  }
   private calculateImportDeclarations() {
     const importDeclarations: ImportDeclaration[] = [];
     for (const node of this.program.body) {
       if (node.type === "ImportDeclaration") {
-        node.specifiers;
         importDeclarations.push(node);
       }
     }
     return importDeclarations;
   }
   private calculateImportSpecifiersMap() {
-    // type AnyImportSpecifier =
-    //   | ImportSpecifier
-    //   | ImportDefaultSpecifier
-    //   | ImportNamespaceSpecifier;
-    const importSpecifiersMap = new Map<string, Array<string>>();
+    const importSpecifiersMap = new Map<
+      ImportDeclaration,
+      Array<ImportSpecifier>
+    >();
     for (const importDeclaration of this.calculateImportDeclarations()) {
-      const importDeclarationValue = importDeclaration.source.value;
-      if (typeof importDeclarationValue !== "string") {
-        throw new Error(
-          `Unsupported ImportDeclaration.source.value which is not string. ImportDeclaration: "${importDeclaration}"`
-        );
-      }
-      const importSpecifiers: string[] = [];
-      importSpecifiersMap.set(importDeclarationValue, importSpecifiers);
+      const importSpecifiers: ImportSpecifier[] = [];
+      importSpecifiersMap.set(importDeclaration, importSpecifiers);
       for (const importSpecifier of importDeclaration.specifiers) {
         // TODO: handle also other types of imports
         if (importSpecifier.type === "ImportSpecifier") {
           if (importSpecifier.imported.type === "Identifier") {
-            const importedSpecifierName = importSpecifier.imported.name;
-            importSpecifiers.push(importedSpecifierName);
+            importSpecifiers.push(importSpecifier);
           }
         }
       }
@@ -87,15 +96,14 @@ class Module {
     return importSpecifiersMap;
   }
   private calculateUsedSpecifiersInModuleBody() {
-    const usedSpecifiers: string[] = [];
+    const usedSpecifiers: Identifier[] = [];
     for (const node of this.program.body) {
       // TODO: support other types of nodes
       if (node.type === "ExpressionStatement") {
         const expression = node.expression;
         if (expression.type === "CallExpression") {
           if (expression.callee.type === "Identifier") {
-            const identifierName = expression.callee.name;
-            usedSpecifiers.push(identifierName);
+            usedSpecifiers.push(expression.callee);
           }
         }
       }
@@ -115,7 +123,11 @@ class Module {
       sourceType: "module",
     });
   }
+  private nodeToPlain(node: Node) {
+    return this.source.slice(node.start, node.end);
+  }
 }
+
 /**
  * Build graph of modules for given entry path.
  */
@@ -127,9 +139,17 @@ class Graph {
   }
   public shakeImportDeclarations() {
     // TODO: implement passes and max depth of optimizations
+    //       instead of iterating through all modules
+    const modulesWithShakedImports = new Map<Module, string>();
     for (const module of this.modules.values()) {
       const notUsedDeclarations = module.calculateNotUsedImportDeclarations();
+      const modifiedCode = module.getCode({
+        withRemovedNodes: notUsedDeclarations,
+      });
+      modulesWithShakedImports.set(module, modifiedCode);
     }
+
+    return modulesWithShakedImports;
   }
   private async initModuleRecursively(path: string, parent: URL) {
     const module = await this.initModule(path, parent);
@@ -149,16 +169,8 @@ class Graph {
     this.modules.set(module.resolvedPath, module);
     return module;
   }
-  // private initVertex(module: Module) {
-  //   const vertex = new Vertex(module);
-  // }
 }
-// /**
-//  * Represents `Module` and its edges
-//  */
-// class Vertex {
-//   constructor(private readonly module: Module) {}
-// }
+
 /**
  * Public API of tree shaker.
  */
@@ -167,9 +179,9 @@ export const treeShaker = async (options: Options) => {
   await graph.build();
   return {
     shake() {
-      graph.shakeImportDeclarations();
-
-      return "";
+      const shakedModules = graph.shakeImportDeclarations();
+      const [initialModule] = shakedModules.values();
+      return initialModule;
     },
   };
 };
