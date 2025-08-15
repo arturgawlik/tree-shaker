@@ -1,7 +1,7 @@
 {
   "type": "module",
   "scripts": {
-    "tap": "tap --timeout 300000"
+    "test": "tap --timeout 300000"
   },
   "dependencies": {
     "acorn": "^8.15.0",

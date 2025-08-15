@@ -10,7 +10,15 @@ import {
 import MagicString from "magic-string";
 
 export type Options = {
-  input: string;
+  /**
+   * Chunks are telling what modules should be produced
+   * with which entry.
+   */
+  chunks: Record<string, string>;
+  /**
+   * This is parent (caller) URL that is used
+   * to resolve modules relative paths.
+   */
   parent: URL;
 };
 
@@ -133,23 +141,23 @@ class Module {
  */
 class Graph {
   private readonly modules = new Map<URL, Module>();
-  constructor(private readonly options: Options) {}
+  constructor(private readonly source: string, private readonly parent: URL) {}
   public async build() {
-    await this.initModuleRecursively(this.options.input, this.options.parent);
+    await this.initModuleRecursively(this.source, this.parent);
   }
-  public shakeImportDeclarations() {
+  public removeUnusedImports() {
     // TODO: implement passes and max depth of optimizations
     //       instead of iterating through all modules
-    const modulesWithShakedImports = new Map<Module, string>();
+    const modulesWithNoUnusedImports = new Map<Module, string>();
     for (const module of this.modules.values()) {
       const notUsedDeclarations = module.calculateNotUsedImportDeclarations();
       const modifiedCode = module.getCode({
         withRemovedNodes: notUsedDeclarations,
       });
-      modulesWithShakedImports.set(module, modifiedCode);
+      modulesWithNoUnusedImports.set(module, modifiedCode);
     }
 
-    return modulesWithShakedImports;
+    return modulesWithNoUnusedImports;
   }
   private async initModuleRecursively(path: string, parent: URL) {
     const module = await this.initModule(path, parent);
@@ -172,16 +180,47 @@ class Graph {
 }
 
 /**
+ * Chunk represents final chunk that is produced after all transformations.
+ * It's responsibility is to contain logic related to transformation of `Graph`
+ * into final chunk.
+ */
+class Chunk {
+  private readonly graph: Graph;
+  public async build(): Promise<void> {
+    await this.graph.build();
+  }
+  public generate() {
+    const withRemovedImports = this.graph.removeUnusedImports();
+    // TODO: this should return all modules concatenated
+    const [[, code]] = withRemovedImports;
+    return code;
+  }
+  constructor(
+    private readonly source: string,
+    private readonly destination: string,
+    private readonly parent: URL
+  ) {
+    this.graph = new Graph(this.source, this.parent);
+  }
+}
+
+/**
  * Public API of tree shaker.
  */
 export const treeShaker = async (options: Options) => {
-  const graph = new Graph(options);
-  await graph.build();
+  const chunks: Chunk[] = [];
+  await Promise.all(
+    Object.entries(options.chunks).map(
+      async ([chunkDestination, chunkSource]) => {
+        const chunk = new Chunk(chunkSource, chunkDestination, options.parent);
+        chunks.push(chunk);
+        await chunk.build();
+      }
+    )
+  );
   return {
-    shake() {
-      const shakedModules = graph.shakeImportDeclarations();
-      const [initialModule] = shakedModules.values();
-      return initialModule;
+    generate() {
+      return chunks.map((chunk) => chunk.generate());
     },
   };
 };
